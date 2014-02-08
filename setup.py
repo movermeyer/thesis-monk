@@ -36,7 +36,7 @@ setup(
     name="tmonk",
     version=monk_tf.__version__,
     description = "thesis build of DFE's MONK",
-    long_description = read("README.rst") + "\n\n" + read("CHANGES.rst"),
+    long_description = "if you are looking for DFE's MONK and not for the fork for my thesis, then you are wrong here - Erik Bernoth",
     author = monk_tf.__author__,
     author_email = "project-monk@dresearch-fe.de",
     url="https://github.com/erikb85/thesis-monk",
