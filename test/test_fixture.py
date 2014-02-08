@@ -146,3 +146,15 @@ def test_cant_parse_exception():
     false_cfg_file = abspath(inspect.getfile(inspect.currentframe()))
     # execute
     sut = fixture.Fixture(false_cfg_file)
+
+def test_echo_conn():
+    """ fixture: create fixture with EchoConnection
+    """
+    # setup
+    sut = fixture.Fixture(here + "/echo_fixture.cfg")
+    expected_out = "hello"
+    send_msg = expected_out
+    # exercise
+    out = sut.devs[0].cmd(send_msg)
+    # verify
+    nt.eq_(expected_out, out)
