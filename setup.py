@@ -30,13 +30,13 @@ def read(name):
         return f.read()
 
 setup(
-    name=monk_tf.__title__,
+    name="tmonk",
     version=monk_tf.__version__,
-    description = "regression test scripting framework for embedded systems developers",
+    description = "thesis build of DFE's MONK",
     long_description = read("README.rst") + "\n\n" + read("CHANGES.rst"),
     author = monk_tf.__author__,
     author_email = "project-monk@dresearch-fe.de",
-    url="https://github.com/DFE/MONK",
+    url="https://github.com/erikb85/thesis-monk",
     packages=[monk_tf.__title__],
     license=read("LICENSE.txt"),
     zip_safe=False,
