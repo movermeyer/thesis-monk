@@ -22,7 +22,7 @@ except ImportError as error:
     from distutils.core import setup
 
 if sys.argv[-1] == 'publish':
-    sys.argv = [sys.argv[0], 'sdist', 'upload']
+    sys.argv = [sys.argv[0], 'sdist', 'bdist_wheel', 'upload']
 
 
 def read(name):
@@ -44,14 +44,16 @@ setup(
     license=read("LICENSE.txt"),
     zip_safe=False,
     install_requires = [
-        "pyserial >=2.5",
+        "pexpect >= 3.3",
+        "requests >= 2.2.1",
+        "pyte >= 0.4.8",
         "configobj >=4.7.2",
     ],provides = [
         "{} ({})".format(monk_tf.__title__, monk_tf.__version__)
     ],
     test_suite = "nose.collector",
     classifiers=[
-        "Development Status :: 3 - Alpha",
+        "Development Status :: 4 - Beta",
         "Environment :: Other Environment",
         "Intended Audience :: Developers",
         "Intended Audience :: Education",

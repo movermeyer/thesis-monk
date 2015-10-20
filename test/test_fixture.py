@@ -24,137 +24,32 @@ from monk_tf import fixture
 logger = logging.getLogger(__name__)
 here = dirname(abspath(inspect.getfile(inspect.currentframe())))
 
-def test_simple_xiniparser():
-    """ fixture: use Xiniparser directly to create simple device
+def test_simple():
+    """ create a simple Fixture instance
+    """
+    # set up + assert; make sure there are no exceptions
+    sut = fixture.Fixture(__file__, auto_search=False)
+
+def test_simple_parse():
+    """ create a config like dict and see if it gets parsed
     """
     # set up
-    sut = fixture.Fixture()
-    props = fixture.XiniParser(here + "/example_fixture.cfg")
-    expected_dev = dev.Device(conn.SerialConnection(
-        name="serial1",
-        port="/dev/ttyUSB0",
-        user="testuser",
-        password="secret1",
-    ))
-    expected_dev.name = "dev1"
+    test_name = "test_input"
+    sut = fixture.Fixture(__file__, auto_search=False, classes={
+        "Mock" : LoadedMock,
+    })
+    sut.props = {
+        test_name : {
+            "type" : "Mock",
+        },
+    }
     # execute
-    sut._update_props(props)
+    sut._logger.info("start execute")
     sut._initialize()
-    # assert
-    # check if names and arguments are the same
-    logger.debug("sut: " + str(sut))
-    nt.eq_(expected_dev.name, sut.devs[0].name)
-    expected_conn = expected_dev.conns[0]
-    sut_conn = sut.devs[0].conns[0]
-    nt.eq_(expected_conn.name, sut_conn.name)
-    nt.eq_(expected_conn._args, sut_conn._args)
-    nt.eq_(expected_conn._kwargs, sut_conn._kwargs)
-
-def test_simple_fixture():
-    """ fixture: use Fixture directly to create simple device
-    """
-    # set up
-    expected_dev = dev.Device(conn.SerialConnection(
-        name="serial1",
-        port="/dev/ttyUSB0",
-        user="testuser",
-        password="secret1",
-    ))
-    expected_dev.name = "dev1"
-    # execute
-    sut = fixture.Fixture(here + "/example_fixture.cfg")
-    # assert
-    # check again like previous test case
-    logger.debug("sut: " + str(sut))
-    nt.eq_(expected_dev.name, sut.devs[0].name)
-    expected_conn = expected_dev.conns[0]
-    sut_conn = sut.devs[0].conns[0]
-    nt.eq_(expected_conn.name, sut_conn.name)
-    nt.eq_(expected_conn._args, sut_conn._args)
-    nt.eq_(expected_conn._kwargs, sut_conn._kwargs)
-
-def test_update_fixture():
-    """ fixture: update a Fixture with a second file
-    """
-    # set up
-    expected_dev = dev.Device(conn.SerialConnection(
-        name="serial2",
-        port="/dev/ttyUSB1",
-        user="testuser2",
-        password="secret2",
-    ))
-    expected_dev.name = "dev1"
-    sut = fixture.Fixture(here + "/example_fixture.cfg")
-    # execute
-    sut.read(here + "/example_fixture_update.cfg")
-    # assert
-    # check again like previous test case
-    logger.debug("sut: " + str(sut))
-    nt.eq_(expected_dev.name, sut.devs[0].name)
-    expected_conn = expected_dev.conns[0]
-    sut_conn = sut.devs[0].conns[0]
-    nt.eq_(expected_conn.name, sut_conn.name)
-    nt.eq_(expected_conn._args, sut_conn._args)
-    nt.eq_(expected_conn._kwargs, sut_conn._kwargs)
-
-def test_add_second_dev_update():
-    """ fixture: update a second dev into Fixture
-    """
-    # set up
-    expected_dev1 = dev.Device(conn.SerialConnection(
-        name="serial1",
-        port="/dev/ttyUSB0",
-        user="testuser",
-        password="secret1",
-    ))
-    expected_dev2 = dev.Device(conn.SerialConnection(
-        name="serial2",
-        port="/dev/ttyUSB1",
-        user="testuser2",
-        password="secret2",
-    ))
-    expected_dev1.name = "dev1"
-    expected_dev2.name = "dev2"
-    sut = fixture.Fixture(here + "/example_fixture.cfg")
-    logger.debug("sut-props-before:" + str(sut.props))
-    # execute
-    sut.read(here + "/example_fixture_dev2.cfg")
-    # assert
-    logger.debug("sut: " + str(sut))
-    sut_dev1 = sut.devs[0] if sut.devs[0].name == "dev1" else sut.devs[1]
-    sut_dev2 = sut.devs[1] if sut.devs[1].name == "dev2" else sut.devs[0]
-    # check dev1
-    nt.eq_(expected_dev1.name, sut_dev1.name)
-    expected_conn = expected_dev1.conns[0]
-    sut_conn = sut_dev1.conns[0]
-    nt.eq_(expected_conn.name, sut_conn.name)
-    nt.eq_(expected_conn._args, sut_conn._args)
-    nt.eq_(expected_conn._kwargs, sut_conn._kwargs)
-    # check dev2
-    nt.eq_(expected_dev2.name, sut_dev2.name)
-    expected_conn = expected_dev2.conns[0]
-    sut_conn = sut_dev2.conns[0]
-    nt.eq_(expected_conn.name, sut_conn.name)
-    nt.eq_(expected_conn._args, sut_conn._args)
-    nt.eq_(expected_conn._kwargs, sut_conn._kwargs)
-
-@nt.raises(fixture.CantParseException)
-def test_cant_parse_exception():
-    """ fixture: reading a file without appropriate parser raises exception
-    """
-    # set up
-    false_cfg_file = abspath(inspect.getfile(inspect.currentframe()))
-    # execute
-    sut = fixture.Fixture(false_cfg_file)
-
-def test_echo_conn():
-    """ fixture: create fixture with EchoConnection
-    """
-    # setup
-    sut = fixture.Fixture(here + "/echo_fixture.cfg")
-    expected_out = "hello"
-    send_msg = expected_out
-    # exercise
-    out = sut.devs[0].cmd(send_msg)
     # verify
-    nt.eq_(expected_out, out)
+    nt.assert_true(isinstance(sut.devs[0], LoadedMock))
+    nt.assert_equals(sut.devs[0].name, test_name)
+
+class LoadedMock(object):
+    def __init__(self, name="wrong", *args, **kwargs):
+        self.name = name

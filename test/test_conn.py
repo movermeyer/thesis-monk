@@ -10,126 +10,71 @@
 # 3 of the License, or (at your option) any later version.
 #
 
+import collections
+
 from nose import tools as nt
 from monk_tf import conn
+
 
 def test_simplest():
     """ conn: create the simplest possible AConnection
     """
-    # nothing to prepare
     # execute
-    sut = conn.AConnection()
-    # assert
-    nt.ok_(sut, "should contain an AConnection object, but contains '{}'"
-            .format(sut))
+    sut = conn.ConnectionBase('')
+    # verify
+    nt.ok_(sut)
 
-def test_call_methods():
-    """ conn: calling a public AConnection method calls its state's method
+def test_send_echo():
+    """ conn: send echo 123 and receive 123
     """
-    # prepare
-    state = MockState()
-    expected_calls = ["connect", "login", "cmd", "disconnect"]
-    sut = conn.AConnection(start_state=state)
+    # setup
+    sut = MockConn(name='', out="123")
+    expected_retcode = 0
+    expected_out = "123"
     # execute
-    sut.connect()
-    sut.login()
-    sut.cmd(None)
-    sut.disconnect()
-    # assert
-    nt.eq_(expected_calls, state.calls,
-            "didn't call the following methods: \"{}\"".format(
-                list(set(expected_calls) - set(state.calls))))
+    retcode, out = sut.cmd("echo 123", do_retcode=False)
+    # verify
+    nt.eq_(out, expected_out)
 
-def test_fsm():
-    """ conn: go through all state transitions
+@nt.raises(AttributeError)
+def test_close_successfully():
+    """ conn: after closing there's no connection any more
     """
-    # prepare
-    txt_in = "qwerty12345"
-    expected = txt_in
-    sut = conn.EchoConnection()
+    # setup
+    sut = MockConn(name='', out="123")
     # execute
-    sut.connect()
-    sut.login()
-    after_login = sut.current_state
-    out = sut.cmd(txt_in)
-    sut.disconnect()
-    # here no exceptions is already a good sign that fsm works
-    # assert
-    nt.eq_(sut.current_state, conn.Disconnected(),
-            "after complete transition end state should be disconnected")
-    nt.eq_(after_login, conn.Authenticated(),
-            "after login, state should be authenticated")
-    nt.eq_(out, expected, "cmd should return same message as was put in")
+    sut.close()
+    # verify
+    sut._exp
 
-@nt.raises(conn.NotConnectedException)
-def test_wrong_state():
-    """ conn: raise Exception when sending cmd unconnected
-    """
-    # prepare
-    sut = conn.EchoConnection()
-    # execute
-    sut.cmd("")
-    # finished, because cmd should raise exception
+# does it recover?
 
-def test_cmd_returncode():
-    """ conn: test connections can handle additional parameters
-    """
-    # set up
-    sut = conn.EchoConnection()
-    sut2 = conn.DefectiveConnection()
-    # execute + assert (raises Error if params can't be parsed)
-    sut._cmd("hello", returncode=True, expected_output=True)
-    try:
-        sut2._cmd("hello", returncode=True, expected_output=True)
-    except conn.MockConnectionException as e:
-        pass
-
-def test_connected_login():
-    """ conn: connection's _login is not called if already logged in
-    """
-    # set up
-    sut = MockConnection(start_state=conn.Connected())
-    # execute
-    sut.login()
-    sut.login()
-    sut.login()
-    # assert
-    nt.ok_("_login" not in sut.calls)
-
-class MockConnection(conn.AConnection):
+class MockConn(conn.ConnectionBase):
 
     def __init__(self, *args, **kwargs):
-        self.calls = []
-        self.logged_in = kwargs.pop("logged_in", False)
-        super(MockConnection, self).__init__(*args, **kwargs)
+        self._exp = Exp()
+        self._exp.before = kwargs.pop("out", None)
+        self._exp.after = ""
+        super(MockConn, self).__init__(*args, **kwargs)
+        self._calls = collections.defaultdict(list)
+        self.prompt = self._exp.before
 
-    def _connect(self):
-        self.calls.add("_connect")
+    def wait_for_prompt(*args, **kwargs):
+        pass
 
-    def _login(self):
-        self.calls.add("_login")
-        self.logged_in = True
+    def _expect(self, pattern, timeout=-1, searchwindowsize=-1):
+        self._calls["_expect"].append((pattern, timeout, searchwindowsize))
 
-    def _cmd(self, *args, **kwargs):
-        self.calls.add("_cmd")
+    def _send(self, pattern, timeout=-1, searchwindowsize=-1):
+        self._calls["_send"].append((pattern, timeout, searchwindowsize))
 
-    def _disconnect(self):
-        self.calls.add("_disconnect")
+    def _sendline(self, pattern, timeout=-1, searchwindowsize=-1):
+        self._calls["_sendline"].append((pattern, timeout, searchwindowsize))
 
-class MockState(conn.AState):
-    calls = []
+    @property
+    def exp(self):
+        return self._exp
 
-    def connect(self, connection):
-        self.calls.append("connect")
-
-    def login(self, connection):
-        self.calls.append("login")
-
-    def cmd(self, connection, msg):
-        self.calls.append("cmd")
-
-    def disconnect(self, connection):
-        self.calls.append("disconnect")
-
-    def next_state(self, connection):
-        return self
+class Exp(object):
+    def close(self):
+        pass

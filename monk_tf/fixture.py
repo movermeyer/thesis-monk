@@ -13,14 +13,16 @@
 
 """
 Instead of creating :py:class:`~monk_tf.dev.Device` and
-:py:class:`~monk_tf.conn.AConnection` objects by yourself, you can also choose
-to put corresponding data in a separate file and let this layer handle the
-object concstruction and destruction for you. Doing this will probably make
+:py:class:`~monk_tf.conn.ConnectionBase` objects by yourself, you can also
+choose to put corresponding data in a separate file and let this layer handle
+the object concstruction and destruction for you. Doing this will probably make
 your test code look more clean, keep the number of places where you need to
-change something as small as possible, and lets you reuse data that you already
-have described.
+change something as small as possible, and enables you to reuse data that you
+already have described.
 
-A hello world test with it looks like this::
+A hello world test with a fixture looks like this:
+
+.. code-block:: python
 
     import nose
     from monk_tf import fixture
@@ -28,22 +30,25 @@ A hello world test with it looks like this::
     def test_hello():
         ''' say hello
         '''
-        # set up
-        h = fixture.Fixture('target_device.cfg')
-        expected_out = "hello"
-        # execute
-        out = h.devs[0].cmd('echo "hello"')
-        # assert
-        nose.tools.eq_(expected_out, out)
-        # tear down
-        h.tear_down()
+        with fixture.Fixture(__file__) as (fix, dev):
+            # set up
+            expected_out = "hello"
+            # execute
+            retcode, out = dev.cmd('echo "hello"')
+            # assert
+            nose.tools.eq_(expected_out, out)
+            # tear down - automatically done by Fixture
 
-When using this layer setting up a device only takes one line of code. The rest
-of the information is in the ``target_device.cfg`` file. :term:`MONK` currently 
-comes with one text format parser predefined, which is the
-:py:class:`~monk_tf.fixture.XiniParser`. ``Xini`` is short for
-:term:`extended INI`. You may, however, use any data format you want, if you
-extend the :py:class:`~monk_tf.fixture.AParser` class accordingly.
+Everything is handled in a context that manages the fixture and your
+:term:`target device`. The Fixture is automatically looking for ``fixture.cfg``
+in the current directory or its parents. The ``fixture.cfg`` contains the data
+that is necessary to build your test fixture. This includes connection data
+like IP, user name, and password. MONK separates this data from the code, that
+the tests can be executed on different :term:`target devices<target device>`
+without changing the tests themselves. The format of these files is quite close
+to ini files, just with an added layer of depth, enabling sections to contain
+other sections if the inner section is surrounded by an additional set of
+square brackets (``[]``).
 
 An example ``Xini`` data file might look like this::
 
@@ -70,13 +75,23 @@ Classes
 -------
 """
 
+import os
+from os import environ
+import os.path as op
 import sys
 import logging
+import collections
+import time
+import io
+import traceback
+import datetime
+import json
 
 import configobj as config
 
-import conn
-import dev
+import monk_tf.general_purpose as gp
+import monk_tf.conn as mc
+import monk_tf.dev as md
 
 logger = logging.getLogger(__name__)
 
@@ -86,67 +101,63 @@ logger = logging.getLogger(__name__)
 #
 ############
 
-class ADeviceException(Exception):
-    """ Base class for exceptions of the device layer.
+class AFixtureException(gp.MonkException):
+    """ Base class for exceptions of the fixture layer.
 
     If you want to make sure that you catch all exceptions that are related
-    to this layer, you should catch *ADeviceExceptions*. This also means
+    to this layer, you should catch *AFixtureExceptions*. This also means
     that if you extend this list of exceptions you should inherit from this
     exception and not from :py:exc:`~exceptions.Exception`.
     """
     pass
 
-class AParseException(ADeviceException):
+class NoDevsChosenException(AFixtureException):
+    """ If the use_devs attribute is not set this is raised
+    """
+    pass
+
+class NoSectypeException(AFixtureException):
+    """ If no name can be derived from parsing a section
+    """
+    pass
+
+class NoDevicesDefinedException(AFixtureException):
+    """ is raised when we found out that there are no devices.
+
+    Currently it makes no sense to use a fixture without devices.
+    """
+    pass
+
+class AParseException(AFixtureException):
     """ Base class for exceptions concerning parsing errors.
     """
     pass
 
-class NotXiniException(AParseException):
-    """
-    is raised when a :term:`fixture file` could not be parsed as
-    :term:`extended INI`.
-    """
-    pass
-
-class CantParseException(ADeviceException):
+class CantParseException(AFixtureException):
     """ is raised when a Fixture cannot parse a given file.
     """
     pass
 
-######################################################
-#
-# Parsers - Read a text file and be used like a dict()
-#
-######################################################
-
-class AParser(dict):
-    """ Base class for all parsers.
-
-    Do not instantiate this class! This basically just provides the :term:`API`
-    that is needed by :py:class:`~monk_tf.fixture.Fixture` to interact with the
-    data that is parsed. Each child class should make sure that it always
-    provides its parsed data like a :py:class:`dict` would. If you require your
-    own parser, you can extend this. :py:class:`~monk_tf.fixture.XiniParser`
-    provides a very basic example.
+class NoPropsException(AFixtureException):
+    """ is raised when
     """
     pass
 
-class XiniParser(config.ConfigObj, AParser):
-    """ Reads config files in :term:`extended INI` format.
+class NoDeviceException(AFixtureException):
+    """ is raised when a :py:clas:`~monk_tf.fixture.Fixture` requires a device but has none.
     """
+    pass
 
-    def _load(self, infile, configspec):
-        """ Changes exception type raised.
+class WrongNameException(AFixtureException):
+    """ is raised when no devs with a given name could be found.
+    """
+    pass
 
-        Overwrites method from :py:class:`~configobj.ConfigObj` to raise a
-        :py:class:`~monk_tf.fixture.NotXiniException` instead of a
-        :py:class:`~configobj.ConfigObjError`.
-        """
-        try:
-            super(XiniParser, self)._load(infile, configspec)
-        except config.ConfigObjError as e:
-            t, val, traceback = sys.exc_info()
-            raise NotXiniException, e.message, traceback
+class UnknownTypeException(AFixtureException):
+    """ Handler Type was not recognized
+    """
+    pass
+
 
 ##############################################################
 #
@@ -154,138 +165,286 @@ class XiniParser(config.ConfigObj, AParser):
 #
 ##############################################################
 
-class Fixture(object):
-    """ Creates :term:`MONK` objects based on dictionary like objects.
+class LogManager(gp.MonkObject):
+    """ managing configuration and setup of logging mechanics
 
-    This is the class that provides the fundamental feature of this layer. It
-    reads data files by trying to parse them via its list of known parsers and
-    if it succeeds, it creates :term:`MONK` objects based on the configuration
-    given by the data file. Most likely these objects are one or more
-    :py:class:`~monk_tf.dev.Device` objects that have at least one
-    :py:class:`~monk_tf.conn.AConnection` object each. If more than one
-    :term:`fixture file` is read containing the same name on the highest level,
-    then the latest data gets used. This does not work on lower levels of
-    nesting, though. If you attempt to overwrite lower levels of nesting, what
-    actually happens is that the highest layer gets overwritten and you lose
-    the data that was stored in the older objects. This is simply how
-    :py:meth:`set.update` works.
-
-    One source of data (either a file name or a child class of
-    :py:class:`~monk_tf.fixture.AParser`) can be given to an object of this
-    class by its constructer, others can be added afterwards with the
-    :py:meth:`~monk_tf.fixture.Fixture.read` method. An example looks like
-    this::
-
-        import monk_tf.fixture as mf
-
-        fixture = mf.Fixture('/etc/monk_tf/default_devices.cfg')
-                .read('~/.monk/default_devices.cfg')
-                # can also be a parser object
-                .read(XiniParser('~/testsuite12345/suite_devices.cfg'))
-
+    Might strongly interact with your nose config or similar.
     """
 
-    _DEFAULT_CLASSES = {
-        "Device" : dev.Device,
-        "SerialConnection" : conn.SerialConnection,
-        "EchoConnection" : conn.EchoConnection,
-        "DefectiveConnection" : conn.DefectiveConnection,
+    def __init__(self, **config):
+        super(LogManager, self).__init__(
+                name=config.pop("name",None),
+                module=__name__,
+        )
+        self.log("load LogManager with config:" + str(config))
+
+class LogHandler(gp.MonkObject):
+
+    _LOGLEVELS = {
+        "CRITICAL": logging.CRITICAL,
+        "ERROR": logging.ERROR,
+        "WARNING": logging.WARNING,
+        "INFO": logging.INFO,
+        "DEBUG": logging.DEBUG,
+        "NOTSET": logging.NOTSET,
     }
 
-    _DEFAULT_PARSERS = [
-        XiniParser,
-    ]
+    def __init__(self, name, sink, target, format, level):
+        super(LogHandler, self).__init__(
+                name=name,
+                module=__name__,
+        )
+        self.sink = sink
+        self.target = self.config_subs(target)
+        self.format = format
+        self.level = level
 
-    def __init__(self, source=None, name=None, parsers=None, classes=None):
+    def register(self):
+        self.pre_register()
+        self.log("set loglevel (to handler and logger):{}".format(self.level))
+        self.handler.setLevel(self._LOGLEVELS[self.level])
+        logging.getLogger(self.target).setLevel(self._LOGLEVELS[self.level])
+        self.log("set format:{}".format(self.format))
+        self.handler.setFormatter(logging.Formatter(
+            fmt=self.format,
+        ))
+        self.log("register at logger '{}'".format(
+            self.target,
+        ))
+        logging.getLogger(self.target).addHandler(self.handler)
+        self.post_register()
+
+    def config_subs(self, txt, subs=None):
+        """ replace the strings in the config that we have reasonable values for
         """
+        substitutes = subs or {
+                "testcase" : gp.find_testname(),
+                "rootlogger" : "",
+                "suitename" : environ.get("SUITE", "suite"),
+                "datetime" : datetime.datetime.now().strftime("%y%m%d-%H%M%S"),
+        }
+        self.log("replaced subs:{}".format(substitutes))
+        return txt % substitutes
 
-        :param source: The :term:`fixture file` or
-                       :py:class:`~monk_tf.fixture.AParser` object to be read.
+    def pre_register(self):
+        pass
 
-        :param name: The name of this object.
+    def post_register(self):
+        pass
 
-        :param parsers: An :python:term:`iterable` of
-                        :py:class:`~monk_tf.fixture.AParser` classes to be used
-                        for parsing a given
-                        :py:attr:`~monk_tf.fixture.Fixture.source`.
+    def __str__(self):
+        return "{}{}".format(
+            self.__class__.__name__,
+            {
+                "sink" : self.sink,
+                "target" : self.target,
+                "format" : self.format,
+                "level" : self.level,
+                "allHandlersOfMyTarget" : ["me" if h==self.handler else h for h in logging.getLogger(self.target).handlers],
+            },
+        )
 
-        :param classes: A :py:class:`dict` of classes to class names. Used for
-                        parsing the type attribute in
-                        :term:`fixture files<fixture file>`.
+
+class StreamHandler(LogHandler):
+    def pre_register(self):
+        # workaround for strange nose handlers
+        for h in logging.getLogger(self.target).handlers:
+            if isinstance(h, logging.StreamHandler):
+                logging.getLogger(self.target).removeHandler(h)
+        stream = sys.stdout if self.sink == "stdout" else sys.stderr
+        self.log("stream:" + str(sys.stdout))
+        self.handler = logging.StreamHandler(stream)
+
+class FileHandler(LogHandler):
+    def pre_register(self):
+        self.handler = logging.FileHandler(self.config_subs(self.sink))
+
+
+
+class Fixture(gp.MonkObject):
+    """ Creates :term:`MONK` objects based on dictionary like objects.
+
+    Use this class if you want to seperate the details of your MONK objects
+    from your code. Also use it if you want to write tests with it, as
+    described above.
+    """
+
+
+    def __init__(self, call_location, name=None,
+            fixture_locations=None, parsers=None):
         """
-        self.name = name or self.__class__.__name__
-        self._logger = logging.getLogger("{}:{}".format(__name__, self.name))
-        self.devs = []
-        self.parsers = parsers or self._DEFAULT_PARSERS
-        self.classes = classes or self._DEFAULT_CLASSES
-        self.props = {}
-        if source:
-            self.read(source)
+        :param call_location: the __file__ from where this is called.
 
-    def read(self, source):
+        :param parsers: a dictionary of name:parser_function pairs that can
+                        interpret a fixture file section and generate an object
+                        based on that.
+
+        :param fixture_locations: where to look for fixture files
+        """
+        super(Fixture, self).__init__(
+            name=name,
+            module=__name__,
+        )
+        self.call_location = call_location
+        self.call_path = op.dirname(op.abspath(self.call_location))
+        self.devs = {}
+        self.ignore_exceptions = []
+        self.props = config.ConfigObj()
+        self.fixture_locations = fixture_locations or self.default_fixturelocations()
+        self.read(loc for loc in self.fixture_locations if op.isfile(loc))
+
+    @property
+    def firstdev(self):
+        self.log("rertreive firstdev()")
+        self.log("devs:{}:use_dev:{}".format(self.devs, self.use_devs))
+        return self.devs.get(self.use_devs[0])
+
+    @property
+    def parsers(self):
+        try:
+            return self._parsers
+        except AttributeError:
+            # trigger default setting
+            self.parsers = None
+            return self._parsers
+
+
+    def default_parsers(self):
+        return {
+            "Device" : self.parse_device,
+            "conns" : self.parse_conns,
+            "SshConnection" : self.parse_sshconn,
+            "SerialConnection" : self.parse_serialconn,
+            "logging" : self.parse_logging,
+            "StreamHandler" : self.parse_streamhandler,
+            "FileHandler" : self.parse_filehandler,
+        }
+
+    @parsers.setter
+    def parsers(self, parsers):
+        self._parsers = parsers or self.default_parsers()
+
+    def default_fixturelocations(self):
+        """ this is preferred over a list/dict
+
+        because some paths need to be set dynamically!
+        """
+        locs = [
+            self.call_path + "/../fixture.cfg",
+        ]
+        self.log("read default fixturelocations: {}".format(self, locs))
+        return locs
+
+    def read(self, sources):
         """ Read more data, either as a file name or as a parser.
 
-        :param source: the data source; either a file name or a
-                       :py:class:`~monk_tf.fixture.AParser` child class
-                       instance.
+        :param sources: a iterable of data sources; each is either a file name
+                        or a :py:class:`~monk_tf.fixture.AParser` child class
+                        instance.
 
         :return: self
         """
-        self._logger.debug("read: " + str(source))
-        props = self._parse(source)
-        self._update_props(props)
+        self.log("read: " + str(sources))
+        self.log("deactivate everything before updating data")
+        self.tear_down()
+        for source in sources:
+            self.log("merge source: '{}'".format(source))
+            self.props.merge(config.ConfigObj(source, interpolation=False))
         self._initialize()
         return self
-
-    def _parse(self, source):
-        """ Parse data file.
-
-        :param source: the data source; either a file name or a
-                       :py:class:`~monk_tf.fixture.AParser` child class
-                       instance.
-
-        :return: Returns a :py:class:`~monk_tf.fixture.AParser` instance.
-        :raises: :py:class:`~monk_tf.fixture.CantParseException`
-        """
-        self._logger.debug("parse: " + str(source))
-        if isinstance(source, AParser):
-            return source
-        else:
-            for parser in self.parsers:
-                try:
-                    return parser(source)
-                except AParseException as e:
-                    self._logger.exception(e)
-                    continue
-            raise CantParseException()
-
-    def _update_props(self, props):
-        """ Updates the properties with a dictionary-like object.
-
-        This basically uses :py:meth:`dict.update` to update
-        :py:attr:`self.props <~monk_tf.fixture.Fixture.props>` with a new set
-        of data.
-
-        :param props: object that can be used with :py:meth:`dict.update`
-        """
-        self._logger.debug("add props: " + str(props))
-        self.props.update(props)
 
     def _initialize(self):
         """ Create :term:`MONK` objects based on self's properties.
         """
-        self._logger.debug("initialize with props: " + str(self.props))
-        self.devs = []
-        for dname in self.props.keys():
-            dconf = dict(self.props[dname])
-            dclass = self.classes[dconf.pop("type")]
-            dconns = []
-            for cname in dconf.keys():
-                cconf = dict(dconf[cname])
-                cclass = self.classes[cconf.pop("type")]
-                cconf['name'] = cname
-                dconns.append(cclass(**cconf))
-            self.devs.append(dclass(name=dname, conns=dconns))
+        self._logger.debug("initialize with props: " + str(json.dumps(self.props, indent=4)))
+        if not self.props:
+            raise NoPropsException("have you created and added any fixture files?")
+        parsed = {}
+        for name, value in self.props.items():
+            parsed[name] = self._parse_section(name, value)
+        self.update(**parsed)
+
+    def update(self, **kwargs):
+        """ update the externally manageable data of this fixture object
+        """
+        self.testlogger = kwargs.pop("logging", self._logger)
+        use_devs = kwargs.pop("use_devs", [])
+        self.use_devs = [use_devs] if isinstance(use_devs, str) else [devname.strip() for devname in use_devs if devname]
+        if not self.use_devs:
+            raise NoDevsChosenException("You need to set a use_devs property to your config file which contains a list of comma separated device names that are defined in your [[conns]] block")
+        self.devs = {n:d for n,d in kwargs.items()}
+
+    def _find_sectype(self, name, section):
+        """ try to retrieve the section type, preferably by name
+
+        :param name: the name of the section and a possible source of the type
+
+        :param section: a dictionary, containing all the attributes necessary
+                        to create an object of the sectype. If it contains a
+                        "type" property this can be used to identify the type.
+
+        :return: the section type, as expected as key for fixture.parsers
+        """
+        try:
+            return name if name in self.parsers else section.pop("type")
+        except KeyError:
+            raise NoSectypeException("for section {}:\n{}".format(name, section))
+
+    def _parse_section(self, name, section):
+        """ parse a deep dictionary depth first, generate objects bottom up
+
+        :name: the name of the current section
+        :section: the dictionary containing
+
+        :return: the object that is generated by this section
+        """
+        try:
+            self._logger.debug("parse_section({},{},{})".format(
+                str(name),
+                type(section).__name__,
+                list(section.keys()),
+            ))
+        except AttributeError as e:
+            # duck tested that this is not a dcitionary.
+            # Non dictionaries are normal types like str or int.
+            # So they are just returned, because they don't need parsing.
+            return section
+        # sectype often means the resulting object type, e.g. SshConn
+        sectype=self._find_sectype(name, section)
+        # first parse section's properties, then apply them
+        self.log("traverse subsections iteratively")
+        section = {k:self._parse_section(k,v) for k,v in section.items()}
+        self.log("create object for section")
+        return self.parsers[sectype](name, sectype, section)
+
+    def parse_serialconn(self, name, sectype, section):
+        section["name"] = name
+        return mc.SerialConn(**section)
+
+    def parse_sshconn(self, name, sectype, section):
+        section["name"] = name
+        return mc.SshConn(**section)
+
+    def parse_device(self, name, sectype, section):
+        section["name"] = name
+        return md.Device(**section)
+
+    def parse_conns(self, name, sectype, section):
+        return {k:v for k,v in section.items()}
+
+    def parse_logging(self, name, sectype, section):
+        self.log("register all handlers")
+        for handler in section.values():
+            handler.register()
+        return self.testlogger
+
+    def parse_streamhandler(self, name, sectype, section):
+        section["name"] = name
+        return StreamHandler(**section)
+
+    def parse_filehandler(self, name, sectype, section):
+        section["name"] = name
+        return FileHandler(**section)
 
     def tear_down(self):
         """ Can be used for explicit destruction of managed objects.
@@ -293,15 +452,29 @@ class Fixture(object):
         This should be called in every :term:`test case` as the last step.
 
         """
-        for device in self.devs:
-            try:
-                del device
-            except Exception as e:
-                logger.exception(e)
-        self.devs = []
+        self.log("teardown")
+        for name, device in self.devs.items():
+            device.close_all()
 
     def __str__(self):
-        return "{cls}.devs:{devs}".format(
-                cls=self.__class__.__name__,
-                devs=[str(d) for d in self.devs],
-        )
+        if hasattr(self, "devs") and self.devs:
+            return str(self.devs)
+        else:
+            return repr(self)
+
+    def __enter__(self):
+        self.log("__enter__ ")
+        return [self, self.firstdev, self.testlogger]
+
+    def __exit__(self, exception_type, exception_val, tb):
+        self.log("__exit__ ")
+        if exception_type and exception_type not in self.ignore_exceptions:
+            buff = io.StringIO()
+            traceback.print_tb(tb, file=buff)
+            self.testlog("\n\n{}:{}:{}:\n{}".format(
+                gp.find_testname(),
+                exception_type.__name__,
+                exception_val,
+                buff.getvalue(),
+            ))
+        self.tear_down()
